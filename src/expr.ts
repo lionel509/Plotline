@@ -148,6 +148,8 @@ export interface ParseContext {
 
 class Parser {
   private i = 0;
+  /** Nesting depth of |...| groups: inside one, a bar closes rather than multiplies. */
+  private barDepth = 0;
 
   constructor(private toks: Tok[], private ctx: ParseContext) {}
 
@@ -232,13 +234,10 @@ class Parser {
   /** True when the next token can begin a factor, i.e. juxtaposition means "times". */
   private startsFactor(): boolean {
     const t = this.peek();
-    if (t.kind === "num" || t.kind === "name" || t.kind === "(" || t.kind === "|" || t.kind === "{") {
-      // "|" is ambiguous: it also closes an absolute value. The caller inside
-      // |...| stops before us by parsing a bounded expression, so treating a
-      // bar as a factor start here is only reached outside such a group.
-      return true;
-    }
-    return false;
+    if (t.kind === "num" || t.kind === "name" || t.kind === "(" || t.kind === "{") return true;
+    // A bar is ambiguous: it opens an absolute value, but inside one it closes
+    // it. Only treat it as the start of a factor when no group is open.
+    return t.kind === "|" && this.barDepth === 0;
   }
 
   private parseUnary(): Node {
@@ -282,8 +281,10 @@ class Parser {
         return inner;
       }
       case "|": {
+        this.barDepth++;
         const inner = this.parseSum();
         this.expect("|");
+        this.barDepth--;
         return { kind: "call", name: "abs", args: [inner] };
       }
       case "{":
