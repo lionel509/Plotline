@@ -91,8 +91,6 @@ export interface Style {
   dashed: boolean;
   label: string;
   fill: boolean;
-  /** Only meaningful on a point set: draw a least-squares line through it. */
-  fit: "linear" | null;
 }
 
 export type Curve =
@@ -124,8 +122,6 @@ export interface Model {
 const SETTING_KEYS = new Set([
   "xmin", "xmax", "ymin", "ymax", "x", "y", "t", "theta", "grid", "minor", "axes",
   "labels", "height", "table", "degrees", "aspect", "title", "bounds",
-  // Read before the model is built, by whoever is hosting the widget.
-  "editable", "controls",
 ]);
 
 const COLOR_NAMES: Record<string, string> = {
@@ -248,7 +244,6 @@ function defaultStyle(index: number): Style {
     dashed: false,
     label: "",
     fill: true,
-    fit: null,
   };
 }
 
@@ -283,10 +278,6 @@ function extractStyle(src: string, style: Style): string {
         break;
       case "nofill":
         style.fill = false;
-        break;
-      case "fit":
-      case "regression":
-        style.fit = value === "" || /^(linear|line|lsq)$/i.test(value) ? "linear" : null;
         break;
     }
   }
@@ -487,8 +478,13 @@ export function buildModel(lines: string[], base: Options): Model {
       // --- a tuple: a point, a point list, or a parametric curve -------
       if (src.startsWith("(")) {
         const tuples = splitTop(src);
-        // One tuple mentioning t is a parametric curve; anything else is points.
-        const isParametric = tuples.length === 1 && /(^|[^A-Za-z0-9_])t([^A-Za-z0-9_]|$)/.test(tuples[0]);
+        const isParametric =
+          tuples.length === 1 &&
+          (() => {
+            const vars = new Set<string>();
+            collectVars(parse(tuples[0].replace(/^\(|\)$/g, "").split(",")[0] || "0", ctx), vars);
+            return /(^|[^A-Za-z0-9_])t([^A-Za-z0-9_]|$)/.test(tuples[0]);
+          })();
         if (isParametric) {
           const inner = tuples[0].trim().replace(/^\(/, "").replace(/\)$/, "");
           const [xs, ys] = splitTop(inner);
@@ -529,7 +525,7 @@ function parsePoints(
   compileWith: (n: Node) => Compiled,
   scope: Scope,
 ): Curve {
-  let fit: "linear" | null = style.fit;
+  let fit: "linear" | null = null;
   let body = src;
   const fitMatch = body.match(/\bfit\s*:?\s*(linear|line)\b/i);
   if (fitMatch) {
@@ -593,9 +589,6 @@ function applySetting(options: Options, key: string, value: string): void {
       if (n !== null) options.height = Math.max(160, Math.min(1200, n));
       break;
     }
-    case "editable":
-    case "controls":
-      break; // handled by the host, kept here so the line is not an error
     case "table": {
       const n = parseNumber(value);
       options.showTable = n !== null ? n > 0 : parseBool(value);
