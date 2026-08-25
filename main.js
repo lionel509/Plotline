@@ -23,10 +23,200 @@ __export(main_exports, {
   default: () => PlotlinePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/calculator.ts
 var import_obsidian = require("obsidian");
+
+// src/poi.ts
+var MAX_POINTS = 60;
+var SAMPLES = 1200;
+var POI_LABEL = {
+  intersection: "intersection",
+  zero: "zero",
+  maximum: "maximum",
+  minimum: "minimum",
+  intercept: "y-intercept"
+};
+function explicitFns(model) {
+  const out = [];
+  for (const curve of model.curves) {
+    if (curve.type !== "explicit" || curve.of !== "y") continue;
+    const scope = Object.assign(/* @__PURE__ */ Object.create(null), model.scope);
+    const f = curve.f;
+    out.push({
+      eval: (x) => {
+        scope.x = x;
+        return f(scope);
+      },
+      color: curve.style.color,
+      label: curve.style.label || "f(x)"
+    });
+  }
+  return out;
+}
+function bisect(f, a, b, scale) {
+  let fa = f(a);
+  let fb = f(b);
+  if (!Number.isFinite(fa) || !Number.isFinite(fb) || fa === 0) {
+    return fa === 0 ? a : null;
+  }
+  if (fa * fb > 0) return null;
+  for (let i = 0; i < 80 && b - a > Math.abs(a + b) * 1e-15 + 1e-15; i++) {
+    const mid = (a + b) / 2;
+    const fm = f(mid);
+    if (!Number.isFinite(fm)) return null;
+    if (fm === 0) return mid;
+    if (fa * fm < 0) {
+      b = mid;
+      fb = fm;
+    } else {
+      a = mid;
+      fa = fm;
+    }
+  }
+  const root = (a + b) / 2;
+  const value = f(root);
+  if (!Number.isFinite(value) || Math.abs(value) > scale * 1e-4) return null;
+  return root;
+}
+function refineExtremum(f, a, b, wantMax) {
+  const phi = (Math.sqrt(5) - 1) / 2;
+  let lo = a;
+  let hi = b;
+  let c = hi - phi * (hi - lo);
+  let d = lo + phi * (hi - lo);
+  let fc = f(c);
+  let fd = f(d);
+  for (let i = 0; i < 90 && hi - lo > Math.abs(lo + hi) * 1e-14 + 1e-14; i++) {
+    const better = wantMax ? fc > fd : fc < fd;
+    if (better) {
+      hi = d;
+      d = c;
+      fd = fc;
+      c = hi - phi * (hi - lo);
+      fc = f(c);
+    } else {
+      lo = c;
+      c = d;
+      fc = fd;
+      d = lo + phi * (hi - lo);
+      fd = f(d);
+    }
+  }
+  const x = (lo + hi) / 2;
+  const y = f(x);
+  return Number.isFinite(y) ? { x, y } : null;
+}
+function dedupe(points, vp) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const p of points) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    if (p.y < vp.ymin || p.y > vp.ymax) continue;
+    const key = `${p.kind}:${Math.round(vp.sx(p.x) * 0.5)}:${Math.round(vp.sy(p.y) * 0.5)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}
+function findPointsOfInterest(model, vp) {
+  const fns = explicitFns(model);
+  const verticals = [];
+  for (const curve of model.curves) {
+    if (curve.type !== "vertical") continue;
+    const x = curve.at(model.scope);
+    if (Number.isFinite(x)) verticals.push({ x, color: curve.style.color });
+  }
+  if (fns.length === 0) return [];
+  const step = vp.spanX / SAMPLES;
+  const xs = [];
+  for (let i = 0; i <= SAMPLES; i++) xs.push(vp.xmin + step * i);
+  const values = fns.map((fn) => xs.map((x) => fn.eval(x)));
+  const scale = Math.max(vp.spanY, 1);
+  const found = [];
+  fns.forEach((fn, i) => {
+    const ys = values[i];
+    for (let k = 0; k < SAMPLES; k++) {
+      const y0 = ys[k];
+      const y1 = ys[k + 1];
+      if (!Number.isFinite(y0) || !Number.isFinite(y1)) continue;
+      if (y0 < 0 && y1 > 0 || y0 > 0 && y1 < 0 || y0 === 0) {
+        const root = bisect(fn.eval, xs[k], xs[k + 1], scale);
+        if (root !== null) found.push({ x: root, y: 0, kind: "zero", color: fn.color, from: fn.label });
+      }
+    }
+    for (let k = 1; k < SAMPLES; k++) {
+      const prev = ys[k - 1];
+      const cur = ys[k];
+      const next = ys[k + 1];
+      if (!Number.isFinite(prev) || !Number.isFinite(cur) || !Number.isFinite(next)) continue;
+      const rising = cur - prev;
+      const falling = next - cur;
+      if (rising === 0 && falling === 0) continue;
+      if (rising > 0 && falling < 0) {
+        const peak = refineExtremum(fn.eval, xs[k - 1], xs[k + 1], true);
+        if (peak) found.push({ ...peak, kind: "maximum", color: fn.color, from: fn.label });
+      } else if (rising < 0 && falling > 0) {
+        const dip = refineExtremum(fn.eval, xs[k - 1], xs[k + 1], false);
+        if (dip) found.push({ ...dip, kind: "minimum", color: fn.color, from: fn.label });
+      }
+    }
+    if (vp.xmin <= 0 && vp.xmax >= 0) {
+      const y = fn.eval(0);
+      if (Number.isFinite(y)) found.push({ x: 0, y, kind: "intercept", color: fn.color, from: fn.label });
+    }
+  });
+  for (let i = 0; i < fns.length; i++) {
+    for (let j = i + 1; j < fns.length; j++) {
+      const diff = (x) => fns[i].eval(x) - fns[j].eval(x);
+      const a = values[i];
+      const b = values[j];
+      for (let k = 0; k < SAMPLES; k++) {
+        const d0 = a[k] - b[k];
+        const d1 = a[k + 1] - b[k + 1];
+        if (!Number.isFinite(d0) || !Number.isFinite(d1)) continue;
+        if (d0 < 0 && d1 > 0 || d0 > 0 && d1 < 0 || d0 === 0) {
+          const x = bisect(diff, xs[k], xs[k + 1], scale);
+          if (x === null) continue;
+          const y = fns[i].eval(x);
+          if (!Number.isFinite(y)) continue;
+          found.push({
+            x,
+            y,
+            kind: "intersection",
+            color: fns[i].color,
+            from: `${fns[i].label} \u2229 ${fns[j].label}`
+          });
+        }
+      }
+    }
+  }
+  for (const line of verticals) {
+    if (line.x < vp.xmin || line.x > vp.xmax) continue;
+    for (const fn of fns) {
+      const y = fn.eval(line.x);
+      if (!Number.isFinite(y)) continue;
+      found.push({
+        x: line.x,
+        y,
+        kind: "intersection",
+        color: line.color,
+        from: `x = ${line.x} \u2229 ${fn.label}`
+      });
+    }
+  }
+  const order = {
+    intersection: 0,
+    zero: 1,
+    maximum: 2,
+    minimum: 2,
+    intercept: 3
+  };
+  const deduped = dedupe(found, vp).sort((p, q) => order[p.kind] - order[q.kind] || p.x - q.x);
+  return deduped.slice(0, MAX_POINTS);
+}
 
 // src/expr.ts
 var ExprError = class extends Error {
@@ -547,6 +737,7 @@ var DEFAULT_OPTIONS = {
   height: 380,
   tableRows: 11,
   showTable: false,
+  keyPoints: true,
   degrees: false,
   equalAspect: false,
   title: "",
@@ -574,6 +765,8 @@ var SETTING_KEYS = /* @__PURE__ */ new Set([
   "aspect",
   "title",
   "bounds",
+  "keypoints",
+  "points-of-interest",
   // Read before the model is built, by whoever is hosting the widget.
   "editable",
   "controls"
@@ -991,6 +1184,10 @@ function applySetting(options, key, value) {
     case "degrees":
       options.degrees = parseBool(value);
       break;
+    case "keypoints":
+    case "points-of-interest":
+      options.keyPoints = parseBool(value);
+      break;
     case "aspect":
       options.equalAspect = value.trim().toLowerCase() === "equal";
       break;
@@ -1251,6 +1448,27 @@ var Renderer = class {
     ctx.restore();
     ctx.restore();
     return { traces, notes };
+  }
+  /** Hollow rings on the solved points: intersections, zeros, turning points. */
+  drawMarkers(pois, vp, theme, active) {
+    const ctx = this.ctx;
+    ctx.save();
+    for (const poi of pois) {
+      const px = vp.sx(poi.x);
+      const py = vp.sy(poi.y);
+      if (px < -12 || px > vp.width + 12 || py < -12 || py > vp.height + 12) continue;
+      const isActive = poi === active;
+      const color = poi.color === "#000000" && theme.isDark ? theme.text : poi.color;
+      ctx.globalAlpha = isActive ? 1 : 0.6;
+      ctx.beginPath();
+      ctx.arc(px, py, isActive ? 5.5 : 4, 0, Math.PI * 2);
+      ctx.fillStyle = theme.background;
+      ctx.fill();
+      ctx.lineWidth = isActive ? 2.6 : 1.8;
+      ctx.strokeStyle = color;
+      ctx.stroke();
+    }
+    ctx.restore();
   }
   drawGrid(vp, theme, minor) {
     const ctx = this.ctx;
@@ -1627,6 +1845,7 @@ var Calculator = class {
   canvas;
   sliderBar;
   noteBar;
+  poiBar;
   tableWrap;
   tooltip;
   renderer;
@@ -1641,6 +1860,10 @@ var Calculator = class {
   changeTimer = 0;
   resizeObserver = null;
   showTable;
+  showKeyPoints = true;
+  pois = [];
+  poiKey = "";
+  activePoi = null;
   tableRows;
   destroyed = false;
   /* ------------------------------------------------------------- layout */
@@ -1658,6 +1881,7 @@ var Calculator = class {
     this.tooltip.hide();
     this.sliderBar = main.createDiv({ cls: "plotline-sliders" });
     this.noteBar = main.createDiv({ cls: "plotline-notes" });
+    this.poiBar = main.createDiv({ cls: "plotline-poi" });
     this.tableWrap = main.createDiv({ cls: "plotline-table-wrap" });
     this.tableWrap.hide();
     this.renderer = new Renderer(this.canvas);
@@ -1694,14 +1918,24 @@ var Calculator = class {
       this.schedule();
     });
     btn("home", "Reset view", () => this.resetView());
-    btn("table", "Data table", () => {
+    const keyBtn = btn("crosshair", "Key points \u2014 intersections, zeros, turning points", () => {
+      this.showKeyPoints = !this.showKeyPoints;
+      this.poiKey = "";
+      this.activePoi = null;
+      keyBtn.toggleClass("is-active", this.showKeyPoints);
+      this.schedule();
+    });
+    const tableBtn = btn("table", "Data table", () => {
       this.showTable = !this.showTable;
+      tableBtn.toggleClass("is-active", this.showTable);
       this.renderTable();
     });
+    this.toggleButtons = { keyPoints: keyBtn, table: tableBtn };
     btn("image-down", "Save the graph as a PNG", () => this.exportPng());
     btn("copy", "Copy the graph to the clipboard", () => this.copyPng());
   }
   titleEl;
+  toggleButtons = null;
   layout() {
     if (this.destroyed) return;
     const width = this.canvasWrap.clientWidth;
@@ -1720,7 +1954,12 @@ var Calculator = class {
       this.vp.set(this.model.options);
       this.showTable = this.model.options.showTable;
       this.tableRows = this.model.options.tableRows;
+      this.showKeyPoints = this.model.options.keyPoints;
     }
+    this.poiKey = "";
+    this.activePoi = null;
+    this.toggleButtons?.keyPoints.toggleClass("is-active", this.showKeyPoints);
+    this.toggleButtons?.table.toggleClass("is-active", this.showTable);
     this.titleEl.setText(this.model.options.title);
     this.titleEl.toggleClass("is-empty", this.model.options.title === "");
     this.renderPanel();
@@ -1755,6 +1994,32 @@ var Calculator = class {
       el.style.setProperty("--plotline-note-color", note.color);
     }
     this.noteBar.toggleClass("is-empty", result.notes.length === 0);
+    this.updateKeyPoints();
+  }
+  /** Solve for the key points, but never mid-drag — it is the expensive part,
+   *  and the markers from the previous resting position are close enough
+   *  while the view is still moving. */
+  updateKeyPoints() {
+    if (!this.showKeyPoints) {
+      if (this.pois.length > 0) {
+        this.pois = [];
+        this.renderPoiList();
+      }
+      return;
+    }
+    const key = [
+      this.vp.xmin,
+      this.vp.xmax,
+      this.vp.ymin,
+      this.vp.ymax,
+      ...this.model.params.map((p) => p.value)
+    ].join(",");
+    if (this.quality === 1 && key !== this.poiKey) {
+      this.poiKey = key;
+      this.pois = findPointsOfInterest(this.model, this.vp);
+      this.renderPoiList();
+    }
+    this.renderer.drawMarkers(this.pois, this.vp, this.theme, this.activePoi);
   }
   /** Drop resolution while the user is dragging, restore it shortly after. */
   interacting() {
@@ -1847,8 +2112,27 @@ var Calculator = class {
       this.schedule();
     });
   }
-  /** Nearest sampled point on any curve, in screen space. */
+  /** What the cursor is over: a solved key point if one is near, otherwise the
+   *  nearest sampled point on a curve. */
   updateTrace(px, py) {
+    let nearest = null;
+    for (const poi of this.pois) {
+      const d = Math.hypot(this.vp.sx(poi.x) - px, this.vp.sy(poi.y) - py);
+      if (d < TRACE_RADIUS && (!nearest || d < nearest.d)) nearest = { poi, d };
+    }
+    if (nearest) {
+      const { poi } = nearest;
+      if (this.activePoi === poi) return;
+      this.activePoi = poi;
+      const sx = this.vp.sx(poi.x);
+      const sy = this.vp.sy(poi.y);
+      this.tracePoint = { px: sx, py: sy };
+      this.showTooltip(`${POI_LABEL[poi.kind]}  (${formatNumber(poi.x)}, ${formatNumber(poi.y)})`, poi.color, sx, sy);
+      this.draw();
+      return;
+    }
+    const hadActive = this.activePoi !== null;
+    this.activePoi = null;
     let best = null;
     for (const t of this.traces) {
       for (const p of t.points) {
@@ -1857,28 +2141,35 @@ var Calculator = class {
       }
     }
     if (!best) {
-      if (this.tracePoint) {
+      if (this.tracePoint || hadActive) {
         this.tracePoint = null;
         this.tooltip.hide();
         this.schedule();
       }
       return;
     }
-    if (this.tracePoint && Math.abs(this.tracePoint.px - best.p.px) < 0.5 && Math.abs(this.tracePoint.py - best.p.py) < 0.5) {
+    if (!hadActive && this.tracePoint && Math.abs(this.tracePoint.px - best.p.px) < 0.5 && Math.abs(this.tracePoint.py - best.p.py) < 0.5) {
       return;
     }
     this.tracePoint = { px: best.p.px, py: best.p.py };
-    this.tooltip.show();
-    this.tooltip.setText(`(${formatNumber(best.p.x)}, ${formatNumber(best.p.y)})`);
-    this.tooltip.style.setProperty("--plotline-trace-color", best.t.style.color);
-    const left = Math.min(this.vp.width - 96, Math.max(4, best.p.px + 12));
-    const top = Math.min(this.vp.height - 30, Math.max(4, best.p.py - 34));
-    this.tooltip.style.left = `${left}px`;
-    this.tooltip.style.top = `${top}px`;
+    this.showTooltip(
+      `(${formatNumber(best.p.x)}, ${formatNumber(best.p.y)})`,
+      best.t.style.color,
+      best.p.px,
+      best.p.py
+    );
     this.draw();
     this.markTrace(best.p.px, best.p.py, best.t.style.color);
   }
   tracePoint = null;
+  showTooltip(text, color, px, py) {
+    this.tooltip.show();
+    this.tooltip.setText(text);
+    this.tooltip.style.setProperty("--plotline-trace-color", color);
+    const width = this.tooltip.offsetWidth || 110;
+    this.tooltip.style.left = `${Math.min(this.vp.width - width - 4, Math.max(4, px + 12))}px`;
+    this.tooltip.style.top = `${Math.min(this.vp.height - 30, Math.max(4, py - 34))}px`;
+  }
   /** A ring on the traced point, painted straight after a redraw. */
   markTrace(px, py, color) {
     const ctx = this.canvas.getContext("2d");
@@ -1892,6 +2183,41 @@ var Calculator = class {
     ctx.strokeStyle = this.theme.background;
     ctx.stroke();
     ctx.restore();
+  }
+  /** The chips under the graph: one per solved point, click to copy. */
+  renderPoiList() {
+    this.poiBar.empty();
+    const shown = this.pois.slice(0, 12);
+    this.poiBar.toggleClass("is-empty", shown.length === 0);
+    if (shown.length === 0) return;
+    for (const poi of shown) {
+      const chip = this.poiBar.createDiv({ cls: "plotline-chip" });
+      chip.style.setProperty("--plotline-chip-color", poi.color);
+      chip.createSpan({ cls: "plotline-chip-kind", text: POI_LABEL[poi.kind] });
+      chip.createSpan({
+        cls: "plotline-chip-value",
+        text: `(${formatNumber(poi.x)}, ${formatNumber(poi.y)})`
+      });
+      chip.setAttr("title", `${poi.from} \u2014 click to copy`);
+      chip.addEventListener("click", () => {
+        void navigator.clipboard.writeText(`(${formatNumber(poi.x)}, ${formatNumber(poi.y)})`);
+        new import_obsidian.Notice("Coordinates copied");
+      });
+      chip.addEventListener("mouseenter", () => {
+        this.activePoi = poi;
+        this.draw();
+      });
+      chip.addEventListener("mouseleave", () => {
+        this.activePoi = null;
+        this.schedule();
+      });
+    }
+    if (this.pois.length > shown.length) {
+      this.poiBar.createSpan({
+        cls: "plotline-chip-more",
+        text: `+${this.pois.length - shown.length} more on the graph`
+      });
+    }
   }
   /* --------------------------------------------------- expression list */
   renderPanel() {
@@ -2208,76 +2534,422 @@ ${body}`;
   }
 };
 
-// src/view.ts
+// src/scientific.ts
 var import_obsidian2 = require("obsidian");
+var CalcSession = class {
+  vars = /* @__PURE__ */ Object.create(null);
+  funcs = /* @__PURE__ */ new Map();
+  env = { funcs: this.funcs };
+  degrees = false;
+  constructor() {
+    this.vars.ans = 0;
+  }
+  reset() {
+    for (const key of Object.keys(this.vars)) delete this.vars[key];
+    this.vars.ans = 0;
+    this.funcs.clear();
+  }
+  context(extra = []) {
+    return {
+      isFunction: (name) => isBuiltinFunction(name) || this.funcs.has(name),
+      isValue: (name) => isConstant(name) || name in this.vars || extra.includes(name)
+    };
+  }
+  /** Evaluate one line. Never throws: a bad line comes back as an error result. */
+  evaluate(line) {
+    const source = line.trim();
+    if (!source) return { kind: "blank", source, value: NaN, text: "" };
+    if (source.startsWith("#") || source.startsWith("//")) {
+      return { kind: "comment", source: source.replace(/^(#|\/\/)\s?/, ""), value: NaN, text: "" };
+    }
+    const mode = source.toLowerCase();
+    if (mode === "deg" || mode === "degrees") {
+      this.degrees = true;
+      return { kind: "comment", source, value: NaN, text: "degrees" };
+    }
+    if (mode === "rad" || mode === "radians") {
+      this.degrees = false;
+      return { kind: "comment", source, value: NaN, text: "radians" };
+    }
+    setAngleMode(this.degrees);
+    try {
+      const eq = topLevelEquals(source);
+      if (eq >= 0) {
+        const lhs = source.slice(0, eq).trim();
+        const rhs = source.slice(eq + 1).trim();
+        const def = lhs.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)$/);
+        if (def) {
+          const name = def[1];
+          const params = def[2].split(",").map((s) => s.trim()).filter(Boolean);
+          const body = compile(parse(rhs, this.context(params)), this.env);
+          this.funcs.set(name, { params, body });
+          return { kind: "define", source, value: NaN, text: `${name}(${params.join(", ")}) defined` };
+        }
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(lhs) && !isConstant(lhs)) {
+          const value2 = compile(parse(rhs, this.context()), this.env)(this.vars);
+          this.vars[lhs] = value2;
+          this.vars.ans = value2;
+          return { kind: "assign", source, value: value2, text: `${lhs} = ${formatNumber(value2, 10)}` };
+        }
+      }
+      const value = compile(parse(source, this.context()), this.env)(this.vars);
+      this.vars.ans = value;
+      return { kind: "value", source, value, text: formatNumber(value, 10) };
+    } catch (err) {
+      const message = err instanceof ExprError || err instanceof Error ? err.message : String(err);
+      return { kind: "error", source, value: NaN, text: message };
+    }
+  }
+  /** Evaluate without recording anything — used for the live preview. */
+  peek(line) {
+    const source = line.trim();
+    if (!source) return "";
+    setAngleMode(this.degrees);
+    try {
+      const eq = topLevelEquals(source);
+      const expr = eq >= 0 ? source.slice(eq + 1) : source;
+      if (eq >= 0 && /\(/.test(source.slice(0, eq))) return "";
+      const value = compile(parse(expr.trim(), this.context()), this.env)(this.vars);
+      return Number.isNaN(value) ? "" : formatNumber(value, 10);
+    } catch {
+      return "";
+    }
+  }
+};
+var KEYS = [
+  [
+    { label: "sin", insert: "sin(" },
+    { label: "cos", insert: "cos(" },
+    { label: "tan", insert: "tan(" },
+    { label: "(", insert: "(" },
+    { label: ")", insert: ")" }
+  ],
+  [
+    { label: "ln", insert: "ln(" },
+    { label: "log", insert: "log(" },
+    { label: "\u221A", insert: "sqrt(" },
+    { label: "x^y", insert: "^" },
+    { label: "n!", insert: "!" }
+  ],
+  [
+    { label: "\u03C0", insert: "pi" },
+    { label: "e", insert: "e" },
+    { label: "ans", insert: "ans" },
+    { label: "\u232B", action: "back" },
+    { label: "C", action: "clear" }
+  ],
+  [
+    { label: "7", insert: "7" },
+    { label: "8", insert: "8" },
+    { label: "9", insert: "9" },
+    { label: "\xF7", insert: "/" },
+    { label: "mod", insert: "mod(" }
+  ],
+  [
+    { label: "4", insert: "4" },
+    { label: "5", insert: "5" },
+    { label: "6", insert: "6" },
+    { label: "\xD7", insert: "*" },
+    { label: "|x|", insert: "abs(" }
+  ],
+  [
+    { label: "1", insert: "1" },
+    { label: "2", insert: "2" },
+    { label: "3", insert: "3" },
+    { label: "\u2212", insert: "-" },
+    { label: ",", insert: "," }
+  ],
+  [
+    { label: "0", insert: "0" },
+    { label: ".", insert: "." },
+    { label: "(\u2212)", insert: "-" },
+    { label: "+", insert: "+" },
+    { label: "=", action: "equals" }
+  ]
+];
+var ScientificCalculator = class {
+  constructor(parent, opts = {}) {
+    this.opts = opts;
+    this.session.degrees = opts.degrees ?? false;
+    this.root = parent.createDiv({ cls: "plotline-sci" });
+    this.build();
+  }
+  root;
+  tape;
+  input;
+  preview;
+  session = new CalcSession();
+  history = [];
+  build() {
+    this.tape = this.root.createDiv({ cls: "plotline-sci-tape" });
+    this.renderTape();
+    const entry = this.root.createDiv({ cls: "plotline-sci-entry" });
+    this.input = entry.createEl("input", {
+      cls: "plotline-sci-input",
+      attr: { type: "text", spellcheck: "false", placeholder: "2 + 2, or a = 9.81" }
+    });
+    this.preview = entry.createDiv({ cls: "plotline-sci-preview" });
+    this.input.addEventListener("input", () => this.updatePreview());
+    this.input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.submit();
+      } else if (e.key === "ArrowUp" && this.history.length > 0) {
+        e.preventDefault();
+        const last = [...this.history].reverse().find((h) => h.kind !== "error");
+        if (last) this.setInput(last.source);
+      } else if (e.key === "Escape") {
+        this.setInput("");
+      }
+    });
+    const pad = this.root.createDiv({ cls: "plotline-sci-pad" });
+    for (const row of KEYS) {
+      for (const key of row) {
+        const b = pad.createEl("button", { cls: "plotline-key", text: key.label });
+        if (key.action === "equals") b.addClass("is-equals");
+        if (!key.insert && key.action !== "equals") b.addClass("is-util");
+        b.addEventListener("click", (e) => {
+          e.preventDefault();
+          if (key.action === "equals") this.submit();
+          else if (key.action === "clear") this.setInput("");
+          else if (key.action === "back") this.backspace();
+          else if (key.insert) this.insert(key.insert);
+        });
+      }
+    }
+    const footer = this.root.createDiv({ cls: "plotline-sci-footer" });
+    const angle = footer.createEl("button", { cls: "plotline-btn plotline-btn-text" });
+    const paintAngle = () => angle.setText(this.session.degrees ? "DEG" : "RAD");
+    paintAngle();
+    angle.setAttr("title", "Switch between degrees and radians");
+    angle.addEventListener("click", () => {
+      this.session.degrees = !this.session.degrees;
+      paintAngle();
+      this.updatePreview();
+    });
+    const clear = footer.createEl("button", {
+      cls: "plotline-btn",
+      attr: { "aria-label": "Clear the tape and every variable", title: "Clear the tape and every variable" }
+    });
+    (0, import_obsidian2.setIcon)(clear, "trash-2");
+    clear.addEventListener("click", () => {
+      this.history = [];
+      this.session.reset();
+      this.renderTape();
+      this.updatePreview();
+    });
+    if (this.opts.onInsert) {
+      const insert = footer.createEl("button", { cls: "plotline-btn plotline-btn-text", text: "Insert into note" });
+      insert.addEventListener("click", () => this.opts.onInsert?.(this.asMarkdown()));
+    }
+  }
+  setInput(text) {
+    this.input.value = text;
+    this.input.focus();
+    this.updatePreview();
+  }
+  insert(text) {
+    const start = this.input.selectionStart ?? this.input.value.length;
+    const end = this.input.selectionEnd ?? start;
+    this.input.value = this.input.value.slice(0, start) + text + this.input.value.slice(end);
+    const caret = start + text.length;
+    this.input.focus();
+    this.input.setSelectionRange(caret, caret);
+    this.updatePreview();
+  }
+  backspace() {
+    const start = this.input.selectionStart ?? this.input.value.length;
+    const end = this.input.selectionEnd ?? start;
+    if (start === end && start > 0) {
+      this.input.value = this.input.value.slice(0, start - 1) + this.input.value.slice(start);
+      this.input.focus();
+      this.input.setSelectionRange(start - 1, start - 1);
+    } else {
+      this.input.value = this.input.value.slice(0, start) + this.input.value.slice(end);
+      this.input.focus();
+      this.input.setSelectionRange(start, start);
+    }
+    this.updatePreview();
+  }
+  updatePreview() {
+    const text = this.session.peek(this.input.value);
+    this.preview.setText(text ? `= ${text}` : "");
+    this.preview.toggleClass("is-empty", text === "");
+  }
+  submit() {
+    const line = this.input.value.trim();
+    if (!line) return;
+    const result = this.session.evaluate(line);
+    this.history.push(result);
+    if (this.history.length > 60) this.history.shift();
+    this.renderTape();
+    if (result.kind !== "error") this.setInput("");
+    else this.updatePreview();
+  }
+  renderTape() {
+    this.tape.empty();
+    if (this.history.length === 0) {
+      this.tape.createDiv({
+        cls: "plotline-sci-hint",
+        text: "Type an expression and press Enter. Assign with a = 9.81, define with f(x) = x^2, and reuse the last answer as ans."
+      });
+      return;
+    }
+    for (const entry of this.history) {
+      const row = this.tape.createDiv({ cls: `plotline-sci-row is-${entry.kind}` });
+      const src = row.createDiv({ cls: "plotline-sci-src", text: entry.source });
+      src.addEventListener("click", () => this.setInput(entry.source));
+      row.createDiv({ cls: "plotline-sci-out", text: entry.kind === "error" ? entry.text : `= ${entry.text}` });
+    }
+    this.tape.scrollTop = this.tape.scrollHeight;
+  }
+  /** The tape as a Markdown list, for dropping into a note. */
+  asMarkdown() {
+    const lines = this.history.filter((h) => h.kind === "value" || h.kind === "assign").map((h) => `- \`${h.source}\` = **${h.text.replace(/^[^=]*=\s*/, "")}**`);
+    if (lines.length === 0) {
+      new import_obsidian2.Notice("Nothing on the tape yet");
+      return "";
+    }
+    return `${lines.join("\n")}
+`;
+  }
+};
+function renderWorksheet(source, el, degrees) {
+  const wrap = el.createDiv({ cls: "plotline-worksheet" });
+  const session = new CalcSession();
+  session.degrees = degrees;
+  let total = 0;
+  let any = false;
+  for (const line of source.replace(/\r/g, "").split("\n")) {
+    const result = session.evaluate(line);
+    if (result.kind === "blank") continue;
+    const row = wrap.createDiv({ cls: `plotline-calc-row is-${result.kind}` });
+    if (result.kind === "comment") {
+      row.createDiv({ cls: "plotline-calc-note", text: result.source });
+      continue;
+    }
+    row.createDiv({ cls: "plotline-calc-src", text: result.source });
+    row.createDiv({ cls: "plotline-calc-out", text: result.text });
+    if (result.kind === "value" && Number.isFinite(result.value)) {
+      total += result.value;
+      any = true;
+    }
+  }
+  if (any) {
+    const foot = wrap.createDiv({ cls: "plotline-calc-total" });
+    foot.createDiv({ cls: "plotline-calc-src", text: "total" });
+    foot.createDiv({ cls: "plotline-calc-out", text: formatNumber(total, 10) });
+  }
+}
+
+// src/view.ts
+var import_obsidian3 = require("obsidian");
 var VIEW_TYPE_PLOTLINE = "plotline-calculator";
-var PlotlineView = class extends import_obsidian2.ItemView {
+var PlotlineView = class extends import_obsidian3.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
   }
   calculator = null;
+  scientific = null;
+  mode = "graph";
+  body = null;
+  bar = null;
   getViewType() {
     return VIEW_TYPE_PLOTLINE;
   }
   getDisplayText() {
-    return "Graphing calculator";
+    return this.mode === "graph" ? "Graphing calculator" : "Scientific calculator";
   }
   getIcon() {
-    return "line-chart";
+    return this.mode === "graph" ? "line-chart" : "calculator";
   }
   async onOpen() {
     const container = this.contentEl;
     container.empty();
     container.addClass("plotline-view");
-    const bar = container.createDiv({ cls: "plotline-viewbar" });
-    const insert = bar.createEl("button", { cls: "plotline-btn plotline-btn-text", text: "Insert into note" });
-    insert.addEventListener("click", () => this.insertIntoNote());
-    const clear = bar.createEl("button", { cls: "plotline-btn plotline-btn-text", text: "Clear" });
-    clear.addEventListener("click", () => this.reset(""));
-    const source = this.plugin.settings.rememberSession ? this.plugin.settings.lastSession : "y = x^2";
-    this.mount(container, source);
+    this.mode = this.plugin.settings.lastMode === "scientific" ? "scientific" : "graph";
+    this.bar = container.createDiv({ cls: "plotline-viewbar" });
+    this.body = container.createDiv({ cls: "plotline-view-host" });
+    this.render();
   }
-  mount(container, source) {
-    this.calculator?.destroy();
-    const host = container.querySelector(".plotline-view-host") ?? container.createDiv({ cls: "plotline-view-host" });
-    host.empty();
-    this.calculator = new Calculator(host, source || "", {
-      editable: true,
-      defaults: this.plugin.blockDefaults(),
-      onChange: (lines) => {
-        this.plugin.settings.lastSession = lines.join("\n");
-        void this.plugin.saveSettings();
-      }
-    });
+  setMode(mode) {
+    if (this.mode === mode) return;
+    this.mode = mode;
+    this.plugin.settings.lastMode = mode;
+    void this.plugin.saveSettings();
+    this.render();
+    this.leaf.setViewState({ type: VIEW_TYPE_PLOTLINE, active: true });
+  }
+  render() {
+    if (!this.bar || !this.body) return;
+    this.teardown();
+    this.bar.empty();
+    this.body.empty();
+    const group = this.bar.createDiv({ cls: "plotline-modes" });
+    const tab = (label, mode) => {
+      const b = group.createEl("button", { cls: "plotline-mode", text: label });
+      b.toggleClass("is-active", this.mode === mode);
+      b.addEventListener("click", () => this.setMode(mode));
+    };
+    tab("Graph", "graph");
+    tab("Calculator", "scientific");
+    if (this.mode === "graph") {
+      const insert = this.bar.createEl("button", { cls: "plotline-btn plotline-btn-text", text: "Insert into note" });
+      insert.addEventListener("click", () => this.insertIntoNote());
+      const clear = this.bar.createEl("button", { cls: "plotline-btn plotline-btn-text", text: "Clear" });
+      clear.addEventListener("click", () => this.reset(""));
+      const source = this.plugin.settings.rememberSession ? this.plugin.settings.lastSession : "y = x^2";
+      this.calculator = new Calculator(this.body, source || "", {
+        editable: true,
+        defaults: this.plugin.blockDefaults(),
+        onChange: (lines) => {
+          this.plugin.settings.lastSession = lines.join("\n");
+          void this.plugin.saveSettings();
+        }
+      });
+    } else {
+      this.scientific = new ScientificCalculator(this.body, {
+        degrees: this.plugin.settings.degrees,
+        onInsert: (text) => this.writeToNote(text)
+      });
+    }
   }
   reset(source) {
-    this.mount(this.contentEl, source);
     this.plugin.settings.lastSession = source;
     void this.plugin.saveSettings();
+    this.render();
   }
   /** Drop the current expression list into the last markdown note as a block. */
   insertIntoNote() {
+    const source = this.calculator?.getSource() ?? "";
+    this.writeToNote("```plot\n" + source.replace(/\s+$/, "") + "\n```\n");
+  }
+  writeToNote(text) {
+    if (!text) return;
     const markdown = this.plugin.lastMarkdownView();
     if (!markdown) {
-      new import_obsidian2.Notice("Open a note first \u2014 Plotline has nowhere to insert the block");
+      new import_obsidian3.Notice("Open a note first \u2014 Plotline has nowhere to insert this");
       return;
     }
-    const source = this.calculator?.getSource() ?? "";
-    const block = "```plot\n" + source.replace(/\s+$/, "") + "\n```\n";
     const editor = markdown.editor;
-    editor.replaceRange(block, editor.getCursor());
+    editor.replaceRange(text, editor.getCursor());
     this.app.workspace.setActiveLeaf(markdown.leaf, { focus: true });
-    new import_obsidian2.Notice("Graph inserted");
+    new import_obsidian3.Notice("Inserted");
   }
-  async onClose() {
+  teardown() {
     this.calculator?.destroy();
     this.calculator = null;
+    this.scientific = null;
+  }
+  async onClose() {
+    this.teardown();
   }
 };
 
 // src/main.ts
 var BLOCK_LANGUAGES = ["plot", "plotline", "desmos"];
+var CALC_LANGUAGES = ["calc", "calculate"];
 var DEFAULT_SETTINGS = {
   xRange: "-10, 10",
   yRange: "-6.5, 6.5",
@@ -2287,16 +2959,18 @@ var DEFAULT_SETTINGS = {
   labels: true,
   degrees: false,
   tableRows: 11,
+  keyPoints: true,
   editableBlocks: false,
   rememberSession: true,
-  lastSession: "y = x^2"
+  lastSession: "y = x^2",
+  lastMode: "graph"
 };
 function parsePair(text, fallback) {
   const parts = text.split(/[,;]|\.\./).map((s) => Number(s.trim()));
   if (parts.length !== 2 || parts.some((n) => !Number.isFinite(n)) || parts[0] >= parts[1]) return fallback;
   return [parts[0], parts[1]];
 }
-var PlotlinePlugin = class extends import_obsidian3.Plugin {
+var PlotlinePlugin = class extends import_obsidian4.Plugin {
   settings = { ...DEFAULT_SETTINGS };
   calculators = /* @__PURE__ */ new Set();
   lastMarkdownLeaf = null;
@@ -2309,11 +2983,51 @@ var PlotlinePlugin = class extends import_obsidian3.Plugin {
         (source, el, ctx) => this.renderBlock(source, el, ctx)
       );
     }
+    for (const language of CALC_LANGUAGES) {
+      this.registerMarkdownCodeBlockProcessor(
+        language,
+        (source, el) => renderWorksheet(source, el, this.settings.degrees)
+      );
+    }
     this.addRibbonIcon("line-chart", "Plotline: graphing calculator", () => void this.openCalculator());
     this.addCommand({
       id: "open-calculator",
       name: "Open the graphing calculator",
       callback: () => void this.openCalculator()
+    });
+    this.addCommand({
+      id: "open-scientific",
+      name: "Open the scientific calculator",
+      callback: () => void this.openCalculator("scientific")
+    });
+    this.addCommand({
+      id: "calculate-selection",
+      name: "Calculate the selection",
+      editorCallback: (editor) => {
+        const selection = editor.getSelection().trim();
+        if (!selection) {
+          new import_obsidian4.Notice("Select something to calculate first");
+          return;
+        }
+        const session = new CalcSession();
+        session.degrees = this.settings.degrees;
+        const results = selection.split("\n").map((line) => session.evaluate(line));
+        const last = [...results].reverse().find((r) => r.kind === "value" || r.kind === "assign");
+        const failed = results.find((r) => r.kind === "error");
+        if (!last) {
+          new import_obsidian4.Notice(failed ? `Plotline: ${failed.text}` : "Nothing to calculate there");
+          return;
+        }
+        editor.replaceSelection(`${selection} = ${last.text.replace(/^[^=]*=\s*/, "")}`);
+      }
+    });
+    this.addCommand({
+      id: "insert-calc-block",
+      name: "Insert a calculation block",
+      editorCallback: (editor) => {
+        const selection = editor.getSelection().trim();
+        editor.replaceSelection("```calc\n" + (selection || "2 + 2") + "\n```\n");
+      }
     });
     this.addCommand({
       id: "insert-graph-block",
@@ -2330,7 +3044,7 @@ var PlotlinePlugin = class extends import_obsidian3.Plugin {
       editorCallback: (editor) => {
         const selection = editor.getSelection().trim();
         if (!selection) {
-          new import_obsidian3.Notice("Select an expression first");
+          new import_obsidian4.Notice("Select an expression first");
           return;
         }
         this.settings.lastSession = selection;
@@ -2339,7 +3053,7 @@ var PlotlinePlugin = class extends import_obsidian3.Plugin {
     });
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
-        if (leaf && leaf.view instanceof import_obsidian3.MarkdownView) this.lastMarkdownLeaf = leaf;
+        if (leaf && leaf.view instanceof import_obsidian4.MarkdownView) this.lastMarkdownLeaf = leaf;
       })
     );
     this.registerEvent(
@@ -2367,7 +3081,8 @@ var PlotlinePlugin = class extends import_obsidian3.Plugin {
       minorGrid: this.settings.minorGrid,
       labels: this.settings.labels,
       degrees: this.settings.degrees,
-      tableRows: this.settings.tableRows
+      tableRows: this.settings.tableRows,
+      keyPoints: this.settings.keyPoints
     };
   }
   renderBlock(source, el, ctx) {
@@ -2378,7 +3093,7 @@ var PlotlinePlugin = class extends import_obsidian3.Plugin {
       onChange: editable ? (lines) => this.writeBack(lines, el, ctx) : void 0
     });
     this.calculators.add(calc);
-    const child = new import_obsidian3.MarkdownRenderChild(el);
+    const child = new import_obsidian4.MarkdownRenderChild(el);
     child.register(() => {
       calc.destroy();
       this.calculators.delete(calc);
@@ -2389,7 +3104,7 @@ var PlotlinePlugin = class extends import_obsidian3.Plugin {
   writeBack(lines, el, ctx) {
     const info = ctx.getSectionInfo(el);
     if (!info) return;
-    const view = this.app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView);
+    const view = this.app.workspace.getActiveViewOfType(import_obsidian4.MarkdownView);
     if (!view || view.file?.path !== ctx.sourcePath) return;
     const editor = view.editor;
     const from = { line: info.lineStart + 1, ch: 0 };
@@ -2398,10 +3113,16 @@ var PlotlinePlugin = class extends import_obsidian3.Plugin {
     if (editor.getRange(from, to) === next) return;
     editor.replaceRange(next, from, to);
   }
-  async openCalculator() {
+  async openCalculator(mode) {
     const { workspace } = this.app;
+    if (mode) {
+      this.settings.lastMode = mode;
+      await this.saveSettings();
+    }
     const existing = workspace.getLeavesOfType(VIEW_TYPE_PLOTLINE);
     if (existing.length > 0) {
+      const view = existing[0].view;
+      if (mode && view instanceof PlotlineView) view.setMode(mode);
       await workspace.revealLeaf(existing[0]);
       return;
     }
@@ -2410,12 +3131,12 @@ var PlotlinePlugin = class extends import_obsidian3.Plugin {
     await workspace.revealLeaf(leaf);
   }
   lastMarkdownView() {
-    const active = this.app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView);
+    const active = this.app.workspace.getActiveViewOfType(import_obsidian4.MarkdownView);
     if (active) return active;
     const view = this.lastMarkdownLeaf?.view;
-    if (view instanceof import_obsidian3.MarkdownView) return view;
+    if (view instanceof import_obsidian4.MarkdownView) return view;
     const leaf = this.app.workspace.getLeavesOfType("markdown")[0];
-    return leaf && leaf.view instanceof import_obsidian3.MarkdownView ? leaf.view : null;
+    return leaf && leaf.view instanceof import_obsidian4.MarkdownView ? leaf.view : null;
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -2424,7 +3145,7 @@ var PlotlinePlugin = class extends import_obsidian3.Plugin {
     await this.saveData(this.settings);
   }
 };
-var PlotlineSettingTab = class extends import_obsidian3.PluginSettingTab {
+var PlotlineSettingTab = class extends import_obsidian4.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -2432,55 +3153,63 @@ var PlotlineSettingTab = class extends import_obsidian3.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian3.Setting(containerEl).setName("Default x range").setDesc("Applied to a block that does not set its own. Two numbers, e.g. -10, 10").addText(
+    new import_obsidian4.Setting(containerEl).setName("Default x range").setDesc("Applied to a block that does not set its own. Two numbers, e.g. -10, 10").addText(
       (t) => t.setValue(this.plugin.settings.xRange).onChange(async (v) => {
         this.plugin.settings.xRange = v;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Default y range").addText(
+    new import_obsidian4.Setting(containerEl).setName("Default y range").addText(
       (t) => t.setValue(this.plugin.settings.yRange).onChange(async (v) => {
         this.plugin.settings.yRange = v;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Graph height").setDesc("Pixels. A block can override this with height: 500").addSlider(
+    new import_obsidian4.Setting(containerEl).setName("Graph height").setDesc("Pixels. A block can override this with height: 500").addSlider(
       (s) => s.setLimits(200, 800, 10).setValue(this.plugin.settings.height).setDynamicTooltip().onChange(async (v) => {
         this.plugin.settings.height = v;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Grid").addToggle(
+    new import_obsidian4.Setting(containerEl).setName("Grid").addToggle(
       (t) => t.setValue(this.plugin.settings.grid).onChange(async (v) => {
         this.plugin.settings.grid = v;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Minor grid lines").addToggle(
+    new import_obsidian4.Setting(containerEl).setName("Minor grid lines").addToggle(
       (t) => t.setValue(this.plugin.settings.minorGrid).onChange(async (v) => {
         this.plugin.settings.minorGrid = v;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Axis labels").addToggle(
+    new import_obsidian4.Setting(containerEl).setName("Axis labels").addToggle(
       (t) => t.setValue(this.plugin.settings.labels).onChange(async (v) => {
         this.plugin.settings.labels = v;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Degrees").setDesc("Trigonometric functions take degrees instead of radians").addToggle(
+    new import_obsidian4.Setting(containerEl).setName("Degrees").setDesc("Trigonometric functions take degrees instead of radians").addToggle(
       (t) => t.setValue(this.plugin.settings.degrees).onChange(async (v) => {
         this.plugin.settings.degrees = v;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Data table rows").setDesc("How many samples the table shows by default").addSlider(
+    new import_obsidian4.Setting(containerEl).setName("Data table rows").setDesc("How many samples the table shows by default").addSlider(
       (s) => s.setLimits(3, 51, 1).setValue(this.plugin.settings.tableRows).setDynamicTooltip().onChange(async (v) => {
         this.plugin.settings.tableRows = v;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Editable blocks").setDesc(
+    new import_obsidian4.Setting(containerEl).setName("Key points").setDesc(
+      "Solve every graph for intersections, zeros, turning points and the y-intercept, mark them, and list them under the graph. A block can override this with keypoints: off"
+    ).addToggle(
+      (t) => t.setValue(this.plugin.settings.keyPoints).onChange(async (v) => {
+        this.plugin.settings.keyPoints = v;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian4.Setting(containerEl).setName("Editable blocks").setDesc(
       "Show the expression list on every graph block and write edits back into the note. Off by default: a single block can opt in with a line reading editable: true"
     ).addToggle(
       (t) => t.setValue(this.plugin.settings.editableBlocks).onChange(async (v) => {
@@ -2488,7 +3217,7 @@ var PlotlineSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Remember the calculator tab").setDesc("Reopen the tab with the expressions that were last in it").addToggle(
+    new import_obsidian4.Setting(containerEl).setName("Remember the calculator tab").setDesc("Reopen the tab with the expressions that were last in it").addToggle(
       (t) => t.setValue(this.plugin.settings.rememberSession).onChange(async (v) => {
         this.plugin.settings.rememberSession = v;
         await this.plugin.saveSettings();

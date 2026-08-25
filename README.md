@@ -2,7 +2,12 @@
 
 A Desmos-style graphing calculator that lives inside Obsidian. Write a fenced
 `plot` block in a note and get an interactive graph: pan, zoom, trace, drag a
-slider, read a table of values off the curve.
+slider, read a table of values off the curve — and it solves the graph for its
+intersections, zeros and turning points instead of making you eyeball them.
+
+There is a scientific calculator in the box too, sharing the same evaluator: a
+keypad and running tape in a tab, and a `calc` block that turns a list of
+expressions in a note into a worked answer column.
 
 No network, no CDN, no bundled maths library — the parser, the evaluator and the
 renderer are all in this repo, so a graph works offline and in a vault that never
@@ -56,7 +61,8 @@ y = sin(x) | color: red
 `x: -5..5` · `y: -2, 2` · `bounds: -5, 5, -2, 2` · `xmin: 0` (and `xmax`, `ymin`,
 `ymax`) · `t: 0..2pi` · `theta: 0..pi` · `height: 500` · `title: Damped
 oscillator` · `grid: off` · `minor: off` · `axes: off` · `labels: off` ·
-`degrees: on` · `aspect: equal` · `table: 21` · `editable: true`
+`degrees: on` · `aspect: equal` · `table: 21` · `keypoints: off` ·
+`editable: true`
 
 ### Per-line modifiers, after a `|`
 
@@ -82,6 +88,14 @@ reset, hover to trace a curve and read the coordinates. Arrow keys pan and
 `+`/`-`/`0` zoom when the canvas has focus. The toolbar adds equal axis scaling,
 a data table, PNG export and copy-to-clipboard.
 
+**Key points** — every `y = f(x)` on the graph is solved for its zeros, turning
+points and y-intercept, and every pair of them for their intersections. The
+results appear as hollow rings on the curve and as chips under the graph; hover
+a ring to read it, click a chip to copy the coordinates. It is numeric, not
+symbolic: sample the visible window, find a sign change, bisect. So it reports
+what is actually on screen — zoom out to find more — and it will not mistake the
+pole of `tan(x)` for a zero. Turn it off per block with `keypoints: off`.
+
 **Data table** — the table button samples every `y = f(x)` across the current
 x window and can copy the result as a Markdown table, which is the fast way to
 get a column of values into a lab report.
@@ -104,6 +118,36 @@ note** drops the current expressions into the last markdown note as a `plot`
 block. There is also **Graph the selection in the calculator** for an expression
 you have highlighted in a note.
 
+## The scientific calculator
+
+**In a tab** — the ribbon icon opens the graph; the **Calculator** button in its
+header switches to a keypad, a running tape and a live preview of the answer as
+you type. Assign with `a = 9.81`, define with `f(x) = x^2`, reuse the previous
+answer as `ans`, and switch DEG/RAD in the footer. **Insert into note** writes
+the tape into the note you were last editing as a Markdown list.
+
+**In a note** — a `calc` block is a worksheet. Every line is evaluated in order
+and shares one session, so a value defined on one line is available to the next:
+
+````markdown
+```calc
+# resistor divider
+vin = 12
+r1 = 4700
+r2 = 10000
+vin * r2 / (r1 + r2)
+```
+````
+
+Each line renders with its answer beside it, definitions show what they defined,
+and a bad line shows its error without stopping the rest. Plain values are
+totalled at the foot, which makes the block double as a quick tally.
+
+**Commands** — *Calculate the selection* evaluates highlighted text in place and
+appends `= answer`; *Insert a calculation block* and *Insert a graph block* drop
+the fences in; *Graph the selection in the calculator* sends an expression to the
+graph tab.
+
 ## Development
 
 ```bash
@@ -117,7 +161,12 @@ npm run check      # tsc --noEmit
 - `src/spec.ts` — turns block lines into settings, parameters and curves.
 - `src/render.ts` — viewport, grid, curve sampling with pole detection, marching
   squares, inequality shading.
+- `src/poi.ts` — the key-point solver: bisection for zeros and intersections,
+  golden-section for turning points, with a pole test so an asymptote is not
+  reported as a root.
 - `src/calculator.ts` — the widget: canvas, expression list, sliders, table.
+- `src/scientific.ts` — the calculation session shared by the keypad panel and
+  the `calc` worksheet.
 - `src/view.ts`, `src/main.ts` — the full tab, and the plugin itself.
 
 ## Licence

@@ -1,6 +1,7 @@
 /** Canvas rendering: grid, axes, and every curve kind the model can hold. */
 
 import { Scope, setAngleMode } from "./expr";
+import { Poi } from "./poi";
 import { Bounds, Curve, linearFit, Model, Style } from "./spec";
 
 export class Viewport implements Bounds {
@@ -269,6 +270,28 @@ export class Renderer {
     ctx.restore();
     ctx.restore();
     return { traces, notes };
+  }
+
+  /** Hollow rings on the solved points: intersections, zeros, turning points. */
+  drawMarkers(pois: Poi[], vp: Viewport, theme: Theme, active: Poi | null): void {
+    const ctx = this.ctx;
+    ctx.save();
+    for (const poi of pois) {
+      const px = vp.sx(poi.x);
+      const py = vp.sy(poi.y);
+      if (px < -12 || px > vp.width + 12 || py < -12 || py > vp.height + 12) continue;
+      const isActive = poi === active;
+      const color = poi.color === "#000000" && theme.isDark ? theme.text : poi.color;
+      ctx.globalAlpha = isActive ? 1 : 0.6;
+      ctx.beginPath();
+      ctx.arc(px, py, isActive ? 5.5 : 4, 0, Math.PI * 2);
+      ctx.fillStyle = theme.background;
+      ctx.fill();
+      ctx.lineWidth = isActive ? 2.6 : 1.8;
+      ctx.strokeStyle = color;
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   private drawGrid(vp: Viewport, theme: Theme, minor: boolean): void {

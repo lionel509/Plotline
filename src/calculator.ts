@@ -2,6 +2,7 @@
  *  Used both by the code-block processor and by the full-tab view. */
 
 import { setIcon, Notice } from "obsidian";
+import { findPointsOfInterest, Poi, POI_LABEL } from "./poi";
 import { formatNumber, Renderer, TraceSet, Theme, readTheme, Viewport } from "./render";
 import { buildModel, DEFAULT_OPTIONS, Model, Options, Param, PALETTE } from "./spec";
 
@@ -22,6 +23,7 @@ export class Calculator {
   private canvas!: HTMLCanvasElement;
   private sliderBar!: HTMLElement;
   private noteBar!: HTMLElement;
+  private poiBar!: HTMLElement;
   private tableWrap!: HTMLElement;
   private tooltip!: HTMLElement;
 
@@ -38,6 +40,10 @@ export class Calculator {
   private changeTimer = 0;
   private resizeObserver: ResizeObserver | null = null;
   private showTable: boolean;
+  private showKeyPoints = true;
+  private pois: Poi[] = [];
+  private poiKey = "";
+  private activePoi: Poi | null = null;
   private tableRows: number;
   private destroyed = false;
 
@@ -69,6 +75,7 @@ export class Calculator {
 
     this.sliderBar = main.createDiv({ cls: "plotline-sliders" });
     this.noteBar = main.createDiv({ cls: "plotline-notes" });
+    this.poiBar = main.createDiv({ cls: "plotline-poi" });
     this.tableWrap = main.createDiv({ cls: "plotline-table-wrap" });
     this.tableWrap.hide();
 
@@ -108,15 +115,25 @@ export class Calculator {
       this.schedule();
     });
     btn("home", "Reset view", () => this.resetView());
-    btn("table", "Data table", () => {
+    const keyBtn = btn("crosshair", "Key points — intersections, zeros, turning points", () => {
+      this.showKeyPoints = !this.showKeyPoints;
+      this.poiKey = "";
+      this.activePoi = null;
+      keyBtn.toggleClass("is-active", this.showKeyPoints);
+      this.schedule();
+    });
+    const tableBtn = btn("table", "Data table", () => {
       this.showTable = !this.showTable;
+      tableBtn.toggleClass("is-active", this.showTable);
       this.renderTable();
     });
+    this.toggleButtons = { keyPoints: keyBtn, table: tableBtn };
     btn("image-down", "Save the graph as a PNG", () => this.exportPng());
     btn("copy", "Copy the graph to the clipboard", () => this.copyPng());
   }
 
   private titleEl!: HTMLElement;
+  private toggleButtons: { keyPoints: HTMLElement; table: HTMLElement } | null = null;
 
   private layout(): void {
     if (this.destroyed) return;
@@ -138,7 +155,12 @@ export class Calculator {
       this.vp.set(this.model.options);
       this.showTable = this.model.options.showTable;
       this.tableRows = this.model.options.tableRows;
+      this.showKeyPoints = this.model.options.keyPoints;
     }
+    this.poiKey = ""; // the curves changed, so the solved points did too
+    this.activePoi = null;
+    this.toggleButtons?.keyPoints.toggleClass("is-active", this.showKeyPoints);
+    this.toggleButtons?.table.toggleClass("is-active", this.showTable);
     this.titleEl.setText(this.model.options.title);
     this.titleEl.toggleClass("is-empty", this.model.options.title === "");
     this.renderPanel();
@@ -179,6 +201,30 @@ export class Calculator {
       el.style.setProperty("--plotline-note-color", note.color);
     }
     this.noteBar.toggleClass("is-empty", result.notes.length === 0);
+    this.updateKeyPoints();
+  }
+
+  /** Solve for the key points, but never mid-drag — it is the expensive part,
+   *  and the markers from the previous resting position are close enough
+   *  while the view is still moving. */
+  private updateKeyPoints(): void {
+    if (!this.showKeyPoints) {
+      if (this.pois.length > 0) {
+        this.pois = [];
+        this.renderPoiList();
+      }
+      return;
+    }
+    const key = [
+      this.vp.xmin, this.vp.xmax, this.vp.ymin, this.vp.ymax,
+      ...this.model.params.map((p) => p.value),
+    ].join(",");
+    if (this.quality === 1 && key !== this.poiKey) {
+      this.poiKey = key;
+      this.pois = findPointsOfInterest(this.model, this.vp);
+      this.renderPoiList();
+    }
+    this.renderer.drawMarkers(this.pois, this.vp, this.theme, this.activePoi);
   }
 
   /** Drop resolution while the user is dragging, restore it shortly after. */
@@ -264,8 +310,29 @@ export class Calculator {
     });
   }
 
-  /** Nearest sampled point on any curve, in screen space. */
+  /** What the cursor is over: a solved key point if one is near, otherwise the
+   *  nearest sampled point on a curve. */
   private updateTrace(px: number, py: number): void {
+    // Key points win — an intersection is the answer someone is hovering to read.
+    let nearest: { poi: Poi; d: number } | null = null;
+    for (const poi of this.pois) {
+      const d = Math.hypot(this.vp.sx(poi.x) - px, this.vp.sy(poi.y) - py);
+      if (d < TRACE_RADIUS && (!nearest || d < nearest.d)) nearest = { poi, d };
+    }
+    if (nearest) {
+      const { poi } = nearest;
+      if (this.activePoi === poi) return;
+      this.activePoi = poi;
+      const sx = this.vp.sx(poi.x);
+      const sy = this.vp.sy(poi.y);
+      this.tracePoint = { px: sx, py: sy };
+      this.showTooltip(`${POI_LABEL[poi.kind]}  (${formatNumber(poi.x)}, ${formatNumber(poi.y)})`, poi.color, sx, sy);
+      this.draw(); // draw() paints the highlighted ring via updateKeyPoints
+      return;
+    }
+    const hadActive = this.activePoi !== null;
+    this.activePoi = null;
+
     let best: { t: TraceSet; p: TraceSet["points"][number]; d: number } | null = null;
     for (const t of this.traces) {
       for (const p of t.points) {
@@ -274,7 +341,7 @@ export class Calculator {
       }
     }
     if (!best) {
-      if (this.tracePoint) {
+      if (this.tracePoint || hadActive) {
         this.tracePoint = null;
         this.tooltip.hide();
         this.schedule(); // wipe the ring left behind
@@ -284,6 +351,7 @@ export class Calculator {
     // Redrawing is not free — an implicit curve is a full marching-squares
     // pass — so only repaint when the traced point actually moved.
     if (
+      !hadActive &&
       this.tracePoint &&
       Math.abs(this.tracePoint.px - best.p.px) < 0.5 &&
       Math.abs(this.tracePoint.py - best.p.py) < 0.5
@@ -291,18 +359,26 @@ export class Calculator {
       return;
     }
     this.tracePoint = { px: best.p.px, py: best.p.py };
-    this.tooltip.show();
-    this.tooltip.setText(`(${formatNumber(best.p.x)}, ${formatNumber(best.p.y)})`);
-    this.tooltip.style.setProperty("--plotline-trace-color", best.t.style.color);
-    const left = Math.min(this.vp.width - 96, Math.max(4, best.p.px + 12));
-    const top = Math.min(this.vp.height - 30, Math.max(4, best.p.py - 34));
-    this.tooltip.style.left = `${left}px`;
-    this.tooltip.style.top = `${top}px`;
+    this.showTooltip(
+      `(${formatNumber(best.p.x)}, ${formatNumber(best.p.y)})`,
+      best.t.style.color,
+      best.p.px,
+      best.p.py,
+    );
     this.draw();
     this.markTrace(best.p.px, best.p.py, best.t.style.color);
   }
 
   private tracePoint: { px: number; py: number } | null = null;
+
+  private showTooltip(text: string, color: string, px: number, py: number): void {
+    this.tooltip.show();
+    this.tooltip.setText(text);
+    this.tooltip.style.setProperty("--plotline-trace-color", color);
+    const width = this.tooltip.offsetWidth || 110;
+    this.tooltip.style.left = `${Math.min(this.vp.width - width - 4, Math.max(4, px + 12))}px`;
+    this.tooltip.style.top = `${Math.min(this.vp.height - 30, Math.max(4, py - 34))}px`;
+  }
 
   /** A ring on the traced point, painted straight after a redraw. */
   private markTrace(px: number, py: number, color: string): void {
@@ -317,6 +393,42 @@ export class Calculator {
     ctx.strokeStyle = this.theme.background;
     ctx.stroke();
     ctx.restore();
+  }
+
+  /** The chips under the graph: one per solved point, click to copy. */
+  private renderPoiList(): void {
+    this.poiBar.empty();
+    const shown = this.pois.slice(0, 12);
+    this.poiBar.toggleClass("is-empty", shown.length === 0);
+    if (shown.length === 0) return;
+    for (const poi of shown) {
+      const chip = this.poiBar.createDiv({ cls: "plotline-chip" });
+      chip.style.setProperty("--plotline-chip-color", poi.color);
+      chip.createSpan({ cls: "plotline-chip-kind", text: POI_LABEL[poi.kind] });
+      chip.createSpan({
+        cls: "plotline-chip-value",
+        text: `(${formatNumber(poi.x)}, ${formatNumber(poi.y)})`,
+      });
+      chip.setAttr("title", `${poi.from} — click to copy`);
+      chip.addEventListener("click", () => {
+        void navigator.clipboard.writeText(`(${formatNumber(poi.x)}, ${formatNumber(poi.y)})`);
+        new Notice("Coordinates copied");
+      });
+      chip.addEventListener("mouseenter", () => {
+        this.activePoi = poi;
+        this.draw();
+      });
+      chip.addEventListener("mouseleave", () => {
+        this.activePoi = null;
+        this.schedule();
+      });
+    }
+    if (this.pois.length > shown.length) {
+      this.poiBar.createSpan({
+        cls: "plotline-chip-more",
+        text: `+${this.pois.length - shown.length} more on the graph`,
+      });
+    }
   }
 
   /* --------------------------------------------------- expression list */

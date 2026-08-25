@@ -45,6 +45,8 @@ export interface Options extends Bounds {
   /** Sample count for the data table. */
   tableRows: number;
   showTable: boolean;
+  /** Solve for intersections, zeros and turning points, and mark them. */
+  keyPoints: boolean;
   degrees: boolean;
   equalAspect: boolean;
   title: string;
@@ -66,6 +68,7 @@ export const DEFAULT_OPTIONS: Options = {
   height: 380,
   tableRows: 11,
   showTable: false,
+  keyPoints: true,
   degrees: false,
   equalAspect: false,
   title: "",
@@ -124,6 +127,7 @@ export interface Model {
 const SETTING_KEYS = new Set([
   "xmin", "xmax", "ymin", "ymax", "x", "y", "t", "theta", "grid", "minor", "axes",
   "labels", "height", "table", "degrees", "aspect", "title", "bounds",
+  "keypoints", "points-of-interest",
   // Read before the model is built, by whoever is hosting the widget.
   "editable", "controls",
 ]);
@@ -163,7 +167,7 @@ function splitTop(src: string, sep = ","): string[] {
 }
 
 /** Find an "=" that is a top-level assignment, not part of <=, >= or !=. */
-function topLevelEquals(src: string): number {
+export function topLevelEquals(src: string): number {
   let depth = 0;
   for (let i = 0; i < src.length; i++) {
     const c = src[i];
@@ -585,6 +589,10 @@ function applySetting(options: Options, key: string, value: string): void {
     case "axes": options.axes = parseBool(value); break;
     case "labels": options.labels = parseBool(value); break;
     case "degrees": options.degrees = parseBool(value); break;
+    case "keypoints":
+    case "points-of-interest":
+      options.keyPoints = parseBool(value);
+      break;
     case "aspect": options.equalAspect = value.trim().toLowerCase() === "equal"; break;
     case "title": options.title = value; break;
     case "height": {

@@ -10,11 +10,14 @@ import {
   WorkspaceLeaf,
 } from "obsidian";
 import { Calculator } from "./calculator";
+import { CalcSession, renderWorksheet } from "./scientific";
 import { DEFAULT_OPTIONS, Options } from "./spec";
-import { PlotlineView, VIEW_TYPE_PLOTLINE } from "./view";
+import { PlotlineMode, PlotlineView, VIEW_TYPE_PLOTLINE } from "./view";
 
 /** Fence languages that render a graph. */
 const BLOCK_LANGUAGES = ["plot", "plotline", "desmos"];
+/** Fence languages that render a calculation worksheet. */
+const CALC_LANGUAGES = ["calc", "calculate"];
 
 interface PlotlineSettings {
   xRange: string;
@@ -25,9 +28,11 @@ interface PlotlineSettings {
   labels: boolean;
   degrees: boolean;
   tableRows: number;
+  keyPoints: boolean;
   editableBlocks: boolean;
   rememberSession: boolean;
   lastSession: string;
+  lastMode: PlotlineMode;
 }
 
 const DEFAULT_SETTINGS: PlotlineSettings = {
@@ -39,9 +44,11 @@ const DEFAULT_SETTINGS: PlotlineSettings = {
   labels: true,
   degrees: false,
   tableRows: 11,
+  keyPoints: true,
   editableBlocks: false,
   rememberSession: true,
   lastSession: "y = x^2",
+  lastMode: "graph",
 };
 
 function parsePair(text: string, fallback: [number, number]): [number, number] {
@@ -66,12 +73,56 @@ export default class PlotlinePlugin extends Plugin {
       );
     }
 
+    for (const language of CALC_LANGUAGES) {
+      this.registerMarkdownCodeBlockProcessor(language, (source, el) =>
+        renderWorksheet(source, el, this.settings.degrees),
+      );
+    }
+
     this.addRibbonIcon("line-chart", "Plotline: graphing calculator", () => void this.openCalculator());
 
     this.addCommand({
       id: "open-calculator",
       name: "Open the graphing calculator",
       callback: () => void this.openCalculator(),
+    });
+
+    this.addCommand({
+      id: "open-scientific",
+      name: "Open the scientific calculator",
+      callback: () => void this.openCalculator("scientific"),
+    });
+
+    this.addCommand({
+      id: "calculate-selection",
+      name: "Calculate the selection",
+      editorCallback: (editor) => {
+        const selection = editor.getSelection().trim();
+        if (!selection) {
+          new Notice("Select something to calculate first");
+          return;
+        }
+        const session = new CalcSession();
+        session.degrees = this.settings.degrees;
+        // A multi-line selection is a worksheet: later lines can use earlier ones.
+        const results = selection.split("\n").map((line) => session.evaluate(line));
+        const last = [...results].reverse().find((r) => r.kind === "value" || r.kind === "assign");
+        const failed = results.find((r) => r.kind === "error");
+        if (!last) {
+          new Notice(failed ? `Plotline: ${failed.text}` : "Nothing to calculate there");
+          return;
+        }
+        editor.replaceSelection(`${selection} = ${last.text.replace(/^[^=]*=\s*/, "")}`);
+      },
+    });
+
+    this.addCommand({
+      id: "insert-calc-block",
+      name: "Insert a calculation block",
+      editorCallback: (editor) => {
+        const selection = editor.getSelection().trim();
+        editor.replaceSelection("```calc\n" + (selection || "2 + 2") + "\n```\n");
+      },
     });
 
     this.addCommand({
@@ -133,6 +184,7 @@ export default class PlotlinePlugin extends Plugin {
       labels: this.settings.labels,
       degrees: this.settings.degrees,
       tableRows: this.settings.tableRows,
+      keyPoints: this.settings.keyPoints,
     };
   }
 
@@ -168,10 +220,16 @@ export default class PlotlinePlugin extends Plugin {
     editor.replaceRange(next, from, to);
   }
 
-  private async openCalculator(): Promise<void> {
+  private async openCalculator(mode?: PlotlineMode): Promise<void> {
     const { workspace } = this.app;
+    if (mode) {
+      this.settings.lastMode = mode;
+      await this.saveSettings();
+    }
     const existing = workspace.getLeavesOfType(VIEW_TYPE_PLOTLINE);
     if (existing.length > 0) {
+      const view = existing[0].view;
+      if (mode && view instanceof PlotlineView) view.setMode(mode);
       await workspace.revealLeaf(existing[0]);
       return;
     }
@@ -281,6 +339,19 @@ class PlotlineSettingTab extends PluginSettingTab {
             this.plugin.settings.tableRows = v;
             await this.plugin.saveSettings();
           }),
+      );
+
+    new Setting(containerEl)
+      .setName("Key points")
+      .setDesc(
+        "Solve every graph for intersections, zeros, turning points and the y-intercept, " +
+          "mark them, and list them under the graph. A block can override this with keypoints: off",
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.keyPoints).onChange(async (v) => {
+          this.plugin.settings.keyPoints = v;
+          await this.plugin.saveSettings();
+        }),
       );
 
     new Setting(containerEl)

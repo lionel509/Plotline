@@ -1,7 +1,7 @@
 {
   "id": "plotline",
   "name": "Plotline",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.6.0",
   "description": "A Desmos-style graphing calculator inside Obsidian. Plots functions, implicit curves, parametrics, polar curves, inequalities and data points in a note or a full tab, with live sliders, a trace readout and a sampled data table.",
   "author": "Lionel Weng",
