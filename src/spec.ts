@@ -6,7 +6,6 @@
 
 import {
   compile,
-  constantValue,
   Env,
   ExprError,
   isBuiltinFunction,
@@ -629,4 +628,3 @@ export function linearFit(pts: [number, number][]): { m: number; b: number; r2: 
   return { m, b, r2 };
 }
 
-export { constantValue };

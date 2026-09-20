@@ -4,7 +4,7 @@
 import { setIcon, Notice } from "obsidian";
 import { findPointsOfInterest, Poi, POI_LABEL } from "./poi";
 import { formatNumber, Renderer, TraceSet, Theme, readTheme, Viewport } from "./render";
-import { buildModel, DEFAULT_OPTIONS, Model, Options, Param, PALETTE } from "./spec";
+import { buildModel, DEFAULT_OPTIONS, Model, Options, Param } from "./spec";
 
 export interface CalculatorOptions {
   /** Show the editable expression list and let the block be rewritten. */
@@ -769,4 +769,3 @@ export class Calculator {
   }
 }
 
-export { PALETTE };
