@@ -169,6 +169,13 @@ npm run check      # tsc --noEmit
   the `calc` worksheet.
 - `src/view.ts`, `src/main.ts` — the full tab, and the plugin itself.
 
+## Cleanup
+
+`.gitignore` covers what this project generates (`node_modules/`, `graphify-out/`,
+secrets, logs, editor droppings). [CLEANUP.md](CLEANUP.md) lists what's left behind —
+including the vault copies `install-local` makes — and the exact commands to remove
+it, keeping `.env` by default.
+
 ## Licence
 
 MIT.
